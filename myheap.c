@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdint.h> //defines fixed-width integer types
 #include <stdbool.h> //boolean logic
+#include <sys/mman.h> //for mmap function
 
 //------------Return type----------
 typedef enum{
@@ -36,8 +37,40 @@ struct heapinfo_t{
     uint32_t avail;// tracks total free bytes remaining
 };
 
+//----------Global heap instance-----
+static struct heapinfo_t heap={0};
+
 //----------init_heap----------------
 heap_e init_heap(struct heapinfo_t *h){
+    void *start=mmap(NULL, //addr-let kernal choose where to place
+                    getpagesize(),//size of memory needed from kernal
+                    PROT_READ| PROT_WRITE,  //MEMORY PROTECTION-read n write alllowed to this mem
+                    MAP_ANONYMOUS | MAP_PRIVATE, //FLAGS-type of mapping
+                    -1,//FD-file to be mapped(here none)
+                    0);//starting byte inside file
     
+    //error check
+    if(start==(void*)-1){ //MAP_FAILED=(void*)-1 LAST ADDR OF KERNAL SPACE
+        perror("mmap");
+        return HEAP_FAILURE;
+    }
+
+    printf("[heap] mmap page at %p\n",start);
+
+    //this start is the first heapchunk_t
+    //its usable size= whole page - header size
+
+    struct heapchunk_t *first=(struct heapchunk_t*)start; //
+    first->size=getpagesize() - sizeof(struct heapchunk_t);
+    first->prevsize=0;
+    first->inuse=false;
+    first->next=NULL;
+
+    //store global heap descriptor
+    h->start=first;
+    h->avail=first->size;
+
+    return HEAP_SUCCESS;
+
 }
 
