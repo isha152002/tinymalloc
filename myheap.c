@@ -39,11 +39,16 @@ struct heapchunk_t{
 struct heapinfo_t{
     struct heapchunk_t *start; //points to the head of free list
     uint32_t avail;// tracks total free bytes remaining
+    void *base; //raw mmap pointer-never changes(for forward coalcsing)
 };
 
 //----------Global heap instance-----
 static struct heapinfo_t heap={0};
 
+//----------- API declarations ------------
+heap_e  init_heap(struct heapinfo_t *h);
+void   *heap_alloc(size_t size);
+heap_e  heap_free(void *data);
 
 //==========init_heap func===========
 //Ask the kernel for one page of memory via mmap, carve out the first (and only) free chunk — the "wilderness" chunk — and wire up the heap descriptor.
@@ -72,10 +77,12 @@ heap_e init_heap(struct heapinfo_t *h){
     first->prevsize=0;
     first->inuse=false;
     first->next=NULL;
+    
 
     //store global heap descriptor
     h->start=first;
     h->avail=first->size;
+    h->base = start; //for boundary checks
 
     return HEAP_SUCCESS;
 
@@ -84,7 +91,8 @@ heap_e init_heap(struct heapinfo_t *h){
 
 //=========heap_alloc func============
 /*Take the first available free chunk, carve out exactly what the user asked for, turn the leftover into a new free chunk, and return a pointer to the to the usable data region (just after the
- heapchunk_t header), exactly like malloc.*/
+ heapchunk_t header), exactly like malloc.
+ (v2 — free list walking + split guard)*/
 //=======================================
 void * heap_alloc(size_t size){
     //STEP1: align size to 16bytes
@@ -168,20 +176,49 @@ void * heap_alloc(size_t size){
 //==========heap_free==============
 /*
 Mark the chunk as free. If the previous chunk is also free → coalesce them into one larger free chunk (prevents fragmentation). Otherwise just prepend this chunk to the free list.
+(v3 — forward + backward coalescing)
+
 */
 //=================================
 heap_e heap_free(void* data){ //user gives data region addr
+    bool forwd_not=true;
     //STEP1: recover the header addr
     struct heapchunk_t *chunk=&((struct heapchunk_t *)data)[-1]; //Backwards to header position
     printf("[heap_free] freeing chunk at %p,size:%d\n",(void*)chunk,chunk->size);
 
-    //STEP2: look backward for prev chunk
+    void *page_end=(char*)heap.base+ getpagesize();
+
+    //STEP2: forward coalesce
+    struct heapchunk_t *nextchunk= (struct heapchunk_t*)((char*)chunk+sizeof(struct heapchunk_t)+chunk->size);
+
+    if((void*)nextchunk < page_end && !nextchunk->inuse){
+        forwd_not=false;
+        printf("[heap_free]  forward coalesce with next @ %p\n", (void *)nextchunk);
+
+
+        //remove nextchunk from free list
+        struct heapchunk_t **pp=&heap.start;
+        while(*pp!=NULL && *pp!=nextchunk){
+            pp=&(*pp)->next;
+        }
+        if(*pp == nextchunk) *pp=nextchunk->next;
+
+        //avail gains back only the header bytes.
+        //nextchunk->size was already counted in avail (it was free).
+        heap.avail+=(uint32_t)sizeof(struct heapchunk_t)+chunk->size;
+
+        //absorb next chunk into chunk
+        chunk->size+=sizeof(struct heapchunk_t) + nextchunk->size;
+
+    }
+
+    //STEP3: (backward coalesce)look backward for prev chunk
     struct heapchunk_t *prevchunk=NULL;
-    if(chunk->prevsize!=NULL){
+    if(chunk->prevsize){
         printf("[heap_free] prevsize: %d\n", chunk->prevsize);
         prevchunk= (struct heapchunk_t*)((char*)chunk-sizeof(struct heapchunk_t)-chunk->prevsize);
         printf("[heap_free] prev in use? %d\n", prevchunk->inuse);
-        printf("[heap_free] prev size %d\n", prevchunk->size);
+        //printf("[heap_free] prev size %d\n", prevchunk->size);
 
     }
 
@@ -202,7 +239,7 @@ heap_e heap_free(void* data){ //user gives data region addr
        prevchunk->next=oldfirst;
 
        //only add current chunk's size as the prev one was already added when it was freed
-       heap.avail+=chunk->size+(uint32_t)sizeof(struct heapchunk_t);
+       heap.avail+=(uint32_t)sizeof(struct heapchunk_t);
     }
     else{
         //normal free
@@ -211,7 +248,10 @@ heap_e heap_free(void* data){ //user gives data region addr
         heap.start=chunk;
         chunk->next=oldfirst;
 
-        heap.avail+=chunk->size;//only add data size as chunk needs its header (meta data)
+        if(forwd_not){
+            heap.avail+=chunk->size;//only add data size as chunk needs its header (meta data)
+        }
+        
     }
 
     chunk->inuse=false;
@@ -220,16 +260,35 @@ heap_e heap_free(void* data){ //user gives data region addr
 }
 
 int main(void){
-    //********** Test 1 **************
-    printf("\n=== test 1: basic alloc/free ===\n");
+    // //********** Test 1 **************
+    // printf("\n=== test 1: basic alloc/free ===\n");
+    // heap = (struct heapinfo_t){0};
+    // init_heap(&heap);
+ 
+    // char *s = heap_alloc(32);
+    // strncpy(s, "hello allocator", 32);
+    // printf("data = \"%s\"\n", s);
+    // heap_free(s);
+    // printf("avail after free: %u\n", heap.avail);
+
+    //********test 2 */
+    printf("\n=== test 3: three-way coalesce (prev + next both free) ===\n");
     heap = (struct heapinfo_t){0};
     init_heap(&heap);
  
-    char *s = heap_alloc(32);
-    strncpy(s, "hello allocator", 32);
-    printf("data = \"%s\"\n", s);
-    heap_free(s);
-    printf("avail after free: %u\n", heap.avail);
+    char *x = heap_alloc(32);
+    char *y = heap_alloc(32);
+    char *z = heap_alloc(32);
+    uint32_t before = heap.avail;
+ 
+    heap_free(x);
+    heap_free(z);
+    printf("avail after freeing x and z: %u\n", heap.avail);
+ 
+    heap_free(y);   /* y: forward coalesce with z, backward coalesce with x */
+    printf("avail after freeing y: %u\n", heap.avail);
+    printf("recovered %u extra bytes (2 absorbed headers)\n",
+           heap.avail - before - 32 - 32 - 32);
 
     return 0;
 }
