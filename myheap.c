@@ -14,6 +14,9 @@
 #include <stdint.h> //defines fixed-width integer types
 #include <stdbool.h> //boolean logic
 #include <sys/mman.h> //for mmap function
+#include <string.h>
+
+#define HEAP_ALIGN 16
 
 //------------Return type----------
 typedef enum{
@@ -85,7 +88,7 @@ heap_e init_heap(struct heapinfo_t *h){
 //=======================================
 void * heap_alloc(size_t size){
     //STEP1: align size to 16bytes
-    size = (size+15) & ~(size_t)15;//rounds up to the nearest multiple of 16
+    size = (size+HEAP_ALIGN-1) & ~(size_t)(HEAP_ALIGN-1);//rounds up to the nearest multiple of 16
 
     //STEP2: check if heap available
     if(size>heap.avail){
@@ -93,26 +96,69 @@ void * heap_alloc(size_t size){
         return (void*)-1;
     }
 
-    //STEP3: store head of free list
+    //STEP3: (first-fit)walk the free list to find a chunk big enough
     struct heapchunk_t *chunk = heap.start;
-    printf("[heap_alloc] found chunk at %p\n",(void*)chunk);
+    struct heapchunk_t *prev=NULL;//to patch free list
+
+    while(chunk!=NULL){
+        if(chunk->size >=size) break;
+        prev=chunk;
+        chunk=chunk->next;
+    }
+
+    //if no single chunk was large enough(heap is fragmented)
+    if(chunk==NULL){
+        printf("[heap_alloc] fragmented - total avail=%u but no chunk >=%zu\n",heap.avail,size);
+        return (void*)-1;
+    }
+
+    printf("[heap_alloc] found chunk at %p (size=%u)\n",(void*)chunk,chunk->size);
+
+
 
     //STEP:4 slice and dice
     uint32_t old_size=chunk->size;
-    chunk->size=(uint32_t)size;
+    uint32_t min_split=(uint32_t)sizeof(struct heapchunk_t)+ HEAP_ALIGN;
     chunk->inuse=true;
 
-    //STEP5: build the new free chunk after this data chunk
-    struct heapchunk_t *next_chunk=(struct heapchunk_t *)((char*)chunk+ sizeof(struct heapchunk_t)+size); //here typecasting to char Because pointer arithmetic in C moves by the size of the type. If i did chunk + 1 on a heapchunk_t * it would jump 24 bytes forward. But i need to jump exactly sizeof(heapchunk_t) + size bytes — so i cast to char * first (1 byte per step), do the arithmetic, then cast back. 
+    if(old_size >= size + min_split){
+        chunk->size = (uint32_t)size;
 
-    next_chunk->size = old_size- (uint32_t)size - sizeof(struct heapchunk_t);
-    next_chunk->prevsize = (uint32_t)size;// so free() can look back for coalesce
-    next_chunk->inuse = false;
-    next_chunk->next = chunk->next; //understand when multiple free chunks
+        //STEP5: build the new free chunk after this data chunk
+        struct heapchunk_t *left_over=(struct heapchunk_t *)((char*)chunk+ sizeof(struct heapchunk_t)+size); //here typecasting to char Because pointer arithmetic in C moves by the size of the type. If i did chunk + 1 on a heapchunk_t * it would jump 24 bytes forward. But i need to jump exactly sizeof(heapchunk_t) + size bytes — so i cast to char * first (1 byte per step), do the arithmetic, then cast back.
 
-    //STEP6: update heap
-    heap.start=next_chunk;
-    heap.avail -= (uint32_t)size + (uint32_t)sizeof(struct heapchunk_t);
+        left_over->size = old_size- (uint32_t)size - sizeof(struct heapchunk_t);
+        left_over->prevsize = (uint32_t)size;// so free() can look back for coalesce
+        left_over->inuse = false;
+        left_over->next = chunk->next; //understand when multiple free chunks
+
+        //patch the free list to remove chunk
+        if(prev==NULL){
+            //chunk was the head
+            heap.start=left_over;
+        }
+        else{
+            //chunk was in middle
+            prev->next=left_over;
+        }
+
+        heap.avail -= (uint32_t)size + (uint32_t)sizeof(struct heapchunk_t);
+        
+    }
+    else{
+        //give whole chunk, just remove it from free list
+        chunk->size=old_size;
+
+        if(prev==NULL){
+            heap.start=chunk->next;
+        }
+        else{
+            prev->next=chunk->next;
+        }
+
+        heap.avail-=old_size;
+    }
+    
 
     //STEP7: return pointer to the data region of the chunk
     return (void*)(chunk+1); //+1 skips the header size
@@ -172,6 +218,23 @@ heap_e heap_free(void* data){ //user gives data region addr
     return HEAP_SUCCESS;
 
 }
+
+int main(void){
+    //********** Test 1 **************
+    printf("\n=== test 1: basic alloc/free ===\n");
+    heap = (struct heapinfo_t){0};
+    init_heap(&heap);
+ 
+    char *s = heap_alloc(32);
+    strncpy(s, "hello allocator", 32);
+    printf("data = \"%s\"\n", s);
+    heap_free(s);
+    printf("avail after free: %u\n", heap.avail);
+
+    return 0;
+}
+
+
 
 
 
