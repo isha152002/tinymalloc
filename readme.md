@@ -43,9 +43,9 @@ gcc -Wall -g -o heap heap.c
 
 ## Version history
 
- version 1 :  Basic alloc/free, backward coalescing 
- version 2 : Free list walking (first-fit), split guard 
- version 3 : Forward coalescing, bidirectional merge 
+-version 1 :  Basic alloc/free, backward coalescing 
+-version 2 : Free list walking (first-fit), split guard 
+-version 3 : Forward coalescing, bidirectional merge 
 
 
 ## Resources I read along the way:
