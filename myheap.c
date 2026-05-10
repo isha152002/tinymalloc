@@ -41,6 +41,7 @@ struct heapinfo_t{
 //----------Global heap instance-----
 static struct heapinfo_t heap={0};
 
+
 //==========init_heap func===========
 //Ask the kernel for one page of memory via mmap, carve out the first (and only) free chunk — the "wilderness" chunk — and wire up the heap descriptor.
 //====================================
@@ -76,6 +77,7 @@ heap_e init_heap(struct heapinfo_t *h){
     return HEAP_SUCCESS;
 
 }
+
 
 //=========heap_alloc func============
 /*Take the first available free chunk, carve out exactly what the user asked for, turn the leftover into a new free chunk, and return a pointer to the to the usable data region (just after the
@@ -116,6 +118,62 @@ void * heap_alloc(size_t size){
     return (void*)(chunk+1); //+1 skips the header size
 
 }
+
+//==========heap_free==============
+/*
+Mark the chunk as free. If the previous chunk is also free → coalesce them into one larger free chunk (prevents fragmentation). Otherwise just prepend this chunk to the free list.
+*/
+//=================================
+heap_e heap_free(void* data){ //user gives data region addr
+    //STEP1: recover the header addr
+    struct heapchunk_t *chunk=&((struct heapchunk_t *)data)[-1]; //Backwards to header position
+    printf("[heap_free] freeing chunk at %p,size:%d\n",(void*)chunk,chunk->size);
+
+    //STEP2: look backward for prev chunk
+    struct heapchunk_t *prevchunk=NULL;
+    if(chunk->prevsize!=NULL){
+        printf("[heap_free] prevsize: %d\n", chunk->prevsize);
+        prevchunk= (struct heapchunk_t*)((char*)chunk-sizeof(struct heapchunk_t)-chunk->prevsize);
+        printf("[heap_free] prev in use? %d\n", prevchunk->inuse);
+        printf("[heap_free] prev size %d\n", prevchunk->size);
+
+    }
+
+    if(prevchunk && !prevchunk->inuse){ //prev chunk exists and is not in use
+        //COALASCE
+        //merge the chunk into the prev free chunk.
+        /*
+        Before: [ prevchunk | prev_data ][ chunk | data ]
+        after: [ prevchunk | prev_data + chunk + data ]
+        */
+       printf("[heap_free] the chunk behind us is free -coalescing\n");
+
+       prevchunk->size+=sizeof(struct heapchunk_t)+chunk->size;
+
+       //putting merged chunk at the head of free list
+       struct heapchunk_t *oldfirst =heap.start;
+       heap.start= prevchunk;
+       prevchunk->next=oldfirst;
+
+       //only add current chunk's size as the prev one was already added when it was freed
+       heap.avail+=chunk->size+(uint32_t)sizeof(struct heapchunk_t);
+    }
+    else{
+        //normal free
+        //prepend this chunk to freelist
+        struct heapchunk_t *oldfirst=heap.start;
+        heap.start=chunk;
+        chunk->next=oldfirst;
+
+        heap.avail+=chunk->size;//only add data size as chunk needs its header (meta data)
+    }
+
+    chunk->inuse=false;
+    return HEAP_SUCCESS;
+
+}
+
+
 
 
 
